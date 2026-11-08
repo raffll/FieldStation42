@@ -458,6 +458,24 @@ class SequenceIO:
                 for r in cursor.fetchall()
             ]
             
+    def get_active_for_sequence_names(self, station_name, sequence_names):
+        """Active child tag paths of the named sequences (any parent tag).
+        Names match exactly or with a "|id" suffix (random_show with sequence_id_array)."""
+        names = list(sequence_names)
+        if not names:
+            return []
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT sequence_name, active_tag_path FROM sequence_group_state WHERE station = ?",
+                (station_name,),
+            )
+            return [
+                path
+                for seq_name, path in cursor.fetchall()
+                if path and seq_name.split("|", 1)[0] in names
+            ]
+
     def get_child_sequences(
         self,
         station_name,

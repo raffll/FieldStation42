@@ -442,6 +442,45 @@ class SequenceAPI:
                     list(disk_files), current_file, existing.current_index
                 )
                 
+    # --- raffll mod: no same show in two consecutive sequences -------------------------
+    # A sequence's neighbours are the other sequences in the slot one hour before or after
+    # it on the same day (weekly schedule). When a random_show sequence picks a show, shows
+    # active in a neighbour are avoided, so e.g. 18:00 and 19:00 don't both run The Muppet Show.
+
+    @staticmethod
+    def _show_key(child_tag):
+        # child tags are "<parent tag>/<show folder>" - compare by the show folder name so the
+        # same show is matched even under different tags
+        return child_tag.rstrip("/").rsplit("/", 1)[-1]
+
+    @staticmethod
+    def _neighbour_sequences(station_config, sequence_name):
+        base = sequence_name.split("|", 1)[0]
+        neighbours = set()
+        for day in DAYS:
+            slots = station_config.get(day)
+            if not isinstance(slots, dict):
+                continue
+            by_hour = {}
+            for hour, slot in slots.items():
+                if isinstance(slot, dict) and "sequence" in slot and str(hour).isdigit():
+                    by_hour[int(hour)] = slot["sequence"]
+            for hour, name in by_hour.items():
+                if name != base:
+                    continue
+                for other in (by_hour.get((hour - 1) % 24), by_hour.get((hour + 1) % 24)):
+                    if other and other != base:
+                        neighbours.add(other)
+        return neighbours
+
+    @staticmethod
+    def _neighbour_shows(station_config, sequence_name):
+        neighbours = SequenceAPI._neighbour_sequences(station_config, sequence_name)
+        if not neighbours:
+            return set()
+        active = SequenceIO().get_active_for_sequence_names(station_config["network_name"], neighbours)
+        return {SequenceAPI._show_key(p) for p in active}
+
     @staticmethod
     def _choose_next_child_sequence(
         station_config,
@@ -465,6 +504,7 @@ class SequenceAPI:
                 station_config["network_name"]
             )
         )
+        neighbour_shows = SequenceAPI._neighbour_shows(station_config, sequence_name)
 
         available = []
 
@@ -476,7 +516,28 @@ class SequenceAPI:
             if child in active_children:
                 continue
 
+            if SequenceAPI._show_key(child) in neighbour_shows:
+                continue
+
             available.append(child)
+
+        # Every child is active somewhere: still keep away from the neighbouring slots.
+        if not available:
+
+            available = [
+                c
+                for c in children
+                if c != current_tag_path and SequenceAPI._show_key(c) not in neighbour_shows
+            ]
+
+        # Only the neighbour's show is left: restart the current show instead of doubling it.
+        if not available:
+
+            available = [
+                c
+                for c in children
+                if SequenceAPI._show_key(c) not in neighbour_shows
+            ]
 
         # If every child is already active somewhere, fall back to allowing active children.
         if not available:
@@ -520,7 +581,10 @@ class SequenceAPI:
             not active_child
             or active_child not in children
         ):
-            active_child = random.choice(children)
+            # raffll mod: first pick avoids shows active in the neighbouring slots
+            neighbour_shows = SequenceAPI._neighbour_shows(station_config, sequence_name)
+            preferred = [c for c in children if SequenceAPI._show_key(c) not in neighbour_shows]
+            active_child = random.choice(preferred or children)
 
             sio.set_active_sequence(
                 station_config["network_name"],
