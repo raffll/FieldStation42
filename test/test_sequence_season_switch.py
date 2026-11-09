@@ -1,4 +1,4 @@
-"""raffll mod: random_show sequences with "sequence_switch": "season" switch show at a season
+"""raffll mod: "sequence_strategy": "random_show_season" sequences switch show at a season
 boundary (checked at slot start) and resume a show where it stopped."""
 
 import os
@@ -52,9 +52,9 @@ class TestSeasonSwitch(unittest.TestCase):
         ns.parent_tag = "shows"
         self.sio.put_sequence("stn", ns)
 
-    def _next(self, slot_start=True, switch_on="season"):
+    def _next(self, slot_start=True, by_season=True):
         entry = SequenceAPI.get_next_in_sequence(
-            self.STATION, self.SEQ, "shows", switch_on=switch_on, slot_start=slot_start
+            self.STATION, self.SEQ, "shows", by_season=by_season, slot_start=slot_start
         )
         return os.path.splitext(os.path.basename(entry.fpath))[0]
 
@@ -91,7 +91,7 @@ class TestSeasonSwitch(unittest.TestCase):
     def test_without_option_shows_run_to_the_end(self):
         self._put_child("ShowA", _eps("ShowA", "S01E01", "S02E01", "S02E02"))
         self._put_child("ShowB", _eps("ShowB", "S01E01"))
-        played = [self._next(switch_on=None) for _ in range(4)]
+        played = [self._next(by_season=False) for _ in range(4)]
         self.assertEqual(played, ["ShowA - S01E01", "ShowA - S02E01", "ShowA - S02E02", "ShowB - S01E01"])
 
     def test_season_of(self):

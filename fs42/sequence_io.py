@@ -72,7 +72,7 @@ class SequenceIO:
                 )
             """)
             # raffll mod: season the active show was in when the last slot started
-            # (sequence_switch = "season")
+            # (sequence_strategy "random_show_season")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS sequence_slot_season (
                     station TEXT NOT NULL,
@@ -490,7 +490,7 @@ class SequenceIO:
 
     def get_active_for_sequence_names(self, station_name, sequence_names):
         """Active child tag paths of the named sequences (any parent tag).
-        Names match exactly or with a "|id" suffix (random_show with sequence_id_array)."""
+        Names match exactly or with a "|id" suffix (random_show(_season) with sequence_id_array)."""
         names = list(sequence_names)
         if not names:
             return []

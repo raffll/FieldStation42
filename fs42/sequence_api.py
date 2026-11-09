@@ -45,13 +45,19 @@ class SequenceAPI:
 
         return seq
 
+    # raffll mod: "random_show_season" = random_show that also switches show at season boundaries
+    RANDOM_SHOW_STRATEGIES = ("random_show", "random_show_season")
+
     @staticmethod
-    def get_next_in_sequence(station_config, sequence_name, tag_path, switch_on=None, slot_start=False) -> SequenceEntry:
+    def is_random_show(slot):
+        return slot.get("sequence_strategy") in SequenceAPI.RANDOM_SHOW_STRATEGIES
+
+    @staticmethod
+    def get_next_in_sequence(station_config, sequence_name, tag_path, by_season=False, slot_start=False) -> SequenceEntry:
         """Next episode of the sequence.
-        raffll mod: switch_on="season" (slot option "sequence_switch") lets a random_show
+        raffll mod: by_season (sequence_strategy "random_show_season") lets a random_show
         sequence switch show at a season boundary, checked at the start of each slot hour
         (slot_start), and resume a show where it stopped instead of restarting it."""
-        by_season = switch_on == "season"
         if by_season and slot_start:
             SequenceAPI._season_switch(station_config, sequence_name, tag_path)
         entry = SequenceAPI._next_entry(station_config, sequence_name, tag_path, resume=by_season)
@@ -255,7 +261,7 @@ class SequenceAPI:
         if isinstance(slot["tags"], list):
             for tag_index, tag in enumerate(slot["tags"]):
                 slot_copy = dict(slot)
-                if slot.get("sequence_strategy") == "random_show":
+                if SequenceAPI.is_random_show(slot):
                     slot_tag_array = slot.get('sequence_id_array')
                     slot_tag_index = ""
                     if slot_tag_array is not None:
@@ -309,7 +315,7 @@ class SequenceAPI:
         seq_end = slot.get("sequence_end", 1)
         catalog_paths = set(e.path for e in CatalogAPI.get_entries(station_config))
 
-        if slot.get("sequence_strategy") == "random_show":
+        if SequenceAPI.is_random_show(slot):
 
             seen_child_tags = set()
 
@@ -543,7 +549,7 @@ class SequenceAPI:
         counts = SequenceAPI._related_show_counts(station_config, sequence_name)
         return random.choice(SequenceAPI._least_used(children, counts, current_tag_path))
         
-    # --- raffll mod: switch show by season (slot option "sequence_switch": "season") --------
+    # --- raffll mod: switch show by season ("sequence_strategy": "random_show_season") ------
     # At the start of each slot hour the sequence checks whether its show has moved into a new
     # season since the last slot started. If so it picks the least used show (same rule as
     # above) and the old show keeps its position, so it continues with that season when a
