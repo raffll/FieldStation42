@@ -442,10 +442,15 @@ class SequenceAPI:
                     list(disk_files), current_file, existing.current_index
                 )
                 
-    # --- raffll mod: no same show in two consecutive sequences -------------------------
-    # A sequence's neighbours are the other sequences in the slot one hour before or after
-    # it on the same day (weekly schedule). When a random_show sequence picks a show, shows
-    # active in a neighbour are avoided, so e.g. 18:00 and 19:00 don't both run The Muppet Show.
+    # --- raffll mod: spread shows over related sequences ---------------------------------
+    # A sequence's related sequences are
+    #   - the sequences in the same hour on the other days (the other rotations of the slot,
+    #     e.g. c2-16-A / c2-16-B / c2-16-C), and
+    #   - the sequences one hour before or after it on the same day.
+    # When a random_show sequence picks a show (first pick or switch after a show ended), it
+    # counts how many related sequences already run each show (sequence_group_state = what is
+    # already planned) and takes one of the least used shows. With fewer shows than sequences
+    # some overlap is unavoidable; the least used show is taken instead of failing.
 
     @staticmethod
     def _show_key(child_tag):
@@ -454,32 +459,52 @@ class SequenceAPI:
         return child_tag.rstrip("/").rsplit("/", 1)[-1]
 
     @staticmethod
-    def _neighbour_sequences(station_config, sequence_name):
+    def _related_sequences(station_config, sequence_name):
         base = sequence_name.split("|", 1)[0]
-        neighbours = set()
+        by_day = {}
         for day in DAYS:
             slots = station_config.get(day)
             if not isinstance(slots, dict):
                 continue
-            by_hour = {}
-            for hour, slot in slots.items():
-                if isinstance(slot, dict) and "sequence" in slot and str(hour).isdigit():
-                    by_hour[int(hour)] = slot["sequence"]
-            for hour, name in by_hour.items():
-                if name != base:
-                    continue
-                for other in (by_hour.get((hour - 1) % 24), by_hour.get((hour + 1) % 24)):
-                    if other and other != base:
-                        neighbours.add(other)
-        return neighbours
+            by_day[day] = {
+                int(hour): slot["sequence"]
+                for hour, slot in slots.items()
+                if isinstance(slot, dict) and "sequence" in slot and str(hour).isdigit()
+            }
+        my_hours = {h for hours in by_day.values() for h, name in hours.items() if name == base}
+        related = set()
+        for hours in by_day.values():
+            for hour, name in hours.items():
+                if name == base:
+                    for other in (hours.get((hour - 1) % 24), hours.get((hour + 1) % 24)):
+                        if other:
+                            related.add(other)
+                if hour in my_hours:
+                    related.add(name)  # same hour, other day / rotation
+        related.discard(base)
+        return related
 
     @staticmethod
-    def _neighbour_shows(station_config, sequence_name):
-        neighbours = SequenceAPI._neighbour_sequences(station_config, sequence_name)
-        if not neighbours:
-            return set()
-        active = SequenceIO().get_active_for_sequence_names(station_config["network_name"], neighbours)
-        return {SequenceAPI._show_key(p) for p in active}
+    def _related_show_counts(station_config, sequence_name):
+        """{show: number of related sequences currently running it}"""
+        related = SequenceAPI._related_sequences(station_config, sequence_name)
+        if not related:
+            return {}
+        active = SequenceIO().get_active_for_sequence_names(station_config["network_name"], related)
+        counts = {}
+        for path in active:
+            key = SequenceAPI._show_key(path)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    @staticmethod
+    def _least_used(children, counts, current_tag_path=None):
+        """Children with the lowest related count. On a tie a new show beats restarting the
+        current one; restarting the current one beats a show a related sequence already runs."""
+        def score(child):
+            return (counts.get(SequenceAPI._show_key(child), 0), child == current_tag_path)
+        best = min(score(c) for c in children)
+        return [c for c in children if score(c) == best]
 
     @staticmethod
     def _choose_next_child_sequence(
@@ -499,60 +524,8 @@ class SequenceAPI:
         if not children:
             return None
 
-        active_children = set(
-            sio.get_all_active_sequences(
-                station_config["network_name"]
-            )
-        )
-        neighbour_shows = SequenceAPI._neighbour_shows(station_config, sequence_name)
-
-        available = []
-
-        for child in children:
-
-            if child == current_tag_path:
-                continue
-
-            if child in active_children:
-                continue
-
-            if SequenceAPI._show_key(child) in neighbour_shows:
-                continue
-
-            available.append(child)
-
-        # Every child is active somewhere: still keep away from the neighbouring slots.
-        if not available:
-
-            available = [
-                c
-                for c in children
-                if c != current_tag_path and SequenceAPI._show_key(c) not in neighbour_shows
-            ]
-
-        # Only the neighbour's show is left: restart the current show instead of doubling it.
-        if not available:
-
-            available = [
-                c
-                for c in children
-                if SequenceAPI._show_key(c) not in neighbour_shows
-            ]
-
-        # If every child is already active somewhere, fall back to allowing active children.
-        if not available:
-
-            available = [
-                c
-                for c in children
-                if c != current_tag_path
-            ]
-
-        # If literally only one child exists, allow it.
-        if not available:
-            available = children
-
-        return random.choice(available)
+        counts = SequenceAPI._related_show_counts(station_config, sequence_name)
+        return random.choice(SequenceAPI._least_used(children, counts, current_tag_path))
         
     @staticmethod
     def _get_active_child_sequence(
@@ -581,10 +554,9 @@ class SequenceAPI:
             not active_child
             or active_child not in children
         ):
-            # raffll mod: first pick avoids shows active in the neighbouring slots
-            neighbour_shows = SequenceAPI._neighbour_shows(station_config, sequence_name)
-            preferred = [c for c in children if SequenceAPI._show_key(c) not in neighbour_shows]
-            active_child = random.choice(preferred or children)
+            # raffll mod: first pick takes one of the shows least used by related sequences
+            counts = SequenceAPI._related_show_counts(station_config, sequence_name)
+            active_child = random.choice(SequenceAPI._least_used(children, counts))
 
             sio.set_active_sequence(
                 station_config["network_name"],
