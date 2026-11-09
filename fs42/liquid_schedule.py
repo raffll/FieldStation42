@@ -134,7 +134,10 @@ class LiquidSchedule:
                         f"{seq_ids[tag_index]}"
                     )
 
-            next_seq = SequenceAPI.get_next_in_sequence(self.conf, seq_name, tag_str)
+            next_seq = SequenceAPI.get_next_in_sequence(
+                self.conf, seq_name, tag_str,
+                switch_on=slot_config.get("sequence_switch"), slot_start=first_in_slot,
+            )
             if next_seq:
                 candidate = self.catalog.entry_by_fpath(next_seq.fpath)
 

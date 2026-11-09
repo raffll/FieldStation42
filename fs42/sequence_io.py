@@ -71,6 +71,17 @@ class SequenceIO:
                     )
                 )
             """)
+            # raffll mod: season the active show was in when the last slot started
+            # (sequence_switch = "season")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sequence_slot_season (
+                    station TEXT NOT NULL,
+                    sequence_name TEXT NOT NULL,
+                    parent_tag TEXT NOT NULL,
+                    season TEXT NOT NULL,
+                    PRIMARY KEY (station, sequence_name, parent_tag)
+                )
+            """)
             cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_sequence_entries_named_sequence
             ON sequence_entries(named_sequence_id)
@@ -232,6 +243,7 @@ class SequenceIO:
             )
             # Delete the named sequences for the station
             cursor.execute("""DELETE FROM named_sequence WHERE station = ?""", (station_name,))
+            cursor.execute("""DELETE FROM sequence_slot_season WHERE station = ?""", (station_name,))
             connection.commit()
 
     def delete_sequence(self,station_name,sequence_name,tag_path):
@@ -458,6 +470,24 @@ class SequenceIO:
                 for r in cursor.fetchall()
             ]
             
+    def get_slot_season(self, station_name, sequence_name, parent_tag):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT season FROM sequence_slot_season WHERE station = ? AND sequence_name = ? AND parent_tag = ?",
+                (station_name, sequence_name, parent_tag),
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def set_slot_season(self, station_name, sequence_name, parent_tag, season):
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO sequence_slot_season (station, sequence_name, parent_tag, season) VALUES (?, ?, ?, ?)",
+                (station_name, sequence_name, parent_tag, season),
+            )
+
     def get_active_for_sequence_names(self, station_name, sequence_names):
         """Active child tag paths of the named sequences (any parent tag).
         Names match exactly or with a "|id" suffix (random_show with sequence_id_array)."""

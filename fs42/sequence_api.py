@@ -46,7 +46,21 @@ class SequenceAPI:
         return seq
 
     @staticmethod
-    def get_next_in_sequence(station_config, sequence_name, tag_path) -> SequenceEntry:
+    def get_next_in_sequence(station_config, sequence_name, tag_path, switch_on=None, slot_start=False) -> SequenceEntry:
+        """Next episode of the sequence.
+        raffll mod: switch_on="season" (slot option "sequence_switch") lets a random_show
+        sequence switch show at a season boundary, checked at the start of each slot hour
+        (slot_start), and resume a show where it stopped instead of restarting it."""
+        by_season = switch_on == "season"
+        if by_season and slot_start:
+            SequenceAPI._season_switch(station_config, sequence_name, tag_path)
+        entry = SequenceAPI._next_entry(station_config, sequence_name, tag_path, resume=by_season)
+        if entry and by_season and slot_start:
+            SequenceAPI._remember_slot_season(station_config, sequence_name, tag_path, entry)
+        return entry
+
+    @staticmethod
+    def _next_entry(station_config, sequence_name, tag_path, resume=False) -> SequenceEntry:
         _l = logging.getLogger("SEQUENCE")
         sio = SequenceIO()
         tag_path = SequenceAPI._get_active_child_sequence(
@@ -109,7 +123,9 @@ class SequenceAPI:
                     next_child
                 )
                 
-                next_seq.current_index = next_seq.start_index
+                # raffll mod: with resume the show continues where it stopped
+                if not (resume and next_seq.start_index <= next_seq.current_index < next_seq.end_index):
+                    next_seq.current_index = next_seq.start_index
 
                 if not SequenceAPI._normalize_sequence_position(next_seq):
                     _l.error(
@@ -527,6 +543,76 @@ class SequenceAPI:
         counts = SequenceAPI._related_show_counts(station_config, sequence_name)
         return random.choice(SequenceAPI._least_used(children, counts, current_tag_path))
         
+    # --- raffll mod: switch show by season (slot option "sequence_switch": "season") --------
+    # At the start of each slot hour the sequence checks whether its show has moved into a new
+    # season since the last slot started. If so it picks the least used show (same rule as
+    # above) and the old show keeps its position, so it continues with that season when a
+    # sequence picks it again. A season that began mid-slot is rewound to its first episode,
+    # so it plays in full later. Only one show available = it simply continues.
+
+    _EPISODE_RE = re.compile(r"[Ss](\d{1,3})[Ee]\d+")
+
+    @staticmethod
+    def _season_of(fpath):
+        """Season of an episode: SxxEyy in the file name, else the parent folder name."""
+        m = SequenceAPI._EPISODE_RE.search(os.path.basename(fpath))
+        if m:
+            return str(int(m.group(1)))
+        return os.path.basename(os.path.dirname(fpath)) or None
+
+    @staticmethod
+    def _remember_slot_season(station_config, sequence_name, parent_tag, entry):
+        sio = SequenceIO()
+        net = station_config["network_name"]
+        if not sio.get_child_sequences(net, sequence_name, parent_tag):
+            return
+        active = sio.get_active_sequence(net, sequence_name, parent_tag)
+        season = SequenceAPI._season_of(entry.fpath)
+        if active and season is not None:
+            sio.set_slot_season(net, sequence_name, parent_tag, f"{active}\n{season}")
+
+    @staticmethod
+    def _season_switch(station_config, sequence_name, parent_tag):
+        _l = logging.getLogger("SEQUENCE")
+        sio = SequenceIO()
+        net = station_config["network_name"]
+        if not sio.get_child_sequences(net, sequence_name, parent_tag):
+            return
+        active = SequenceAPI._get_active_child_sequence(station_config, sequence_name, parent_tag)
+        stored = sio.get_slot_season(net, sequence_name, parent_tag)
+        if not stored:
+            return
+        stored_child, _, stored_season = stored.partition("\n")
+        if stored_child != active:
+            return  # the show changed mid-slot (series ended) - nothing to compare with
+
+        seq = sio.get_sequence(net, sequence_name, active)
+        if not SequenceAPI._normalize_sequence_position(seq):
+            return
+        idx = seq.current_index
+        if idx < 0 or idx >= seq.end_index:
+            return  # end of the series - the normal end-of-sequence switch handles it
+        season = SequenceAPI._season_of(seq.episodes[idx].fpath)
+        if season is None or season == stored_season:
+            return
+
+        next_child = SequenceAPI._choose_next_child_sequence(station_config, sequence_name, parent_tag, active)
+        if not next_child or next_child == active:
+            return
+
+        rewind = idx
+        while rewind > seq.start_index and SequenceAPI._season_of(seq.episodes[rewind - 1].fpath) == season:
+            rewind -= 1
+        if rewind != idx:
+            sio.update_current_index(net, sequence_name, active, rewind)
+
+        nxt = sio.get_sequence(net, sequence_name, next_child)
+        if nxt and not (nxt.start_index <= nxt.current_index < nxt.end_index):
+            sio.update_current_index(net, sequence_name, next_child, nxt.start_index)
+
+        _l.info(f"Season {stored_season} -> {season} of {active}: switching to {next_child}")
+        sio.set_active_sequence(net, sequence_name, parent_tag, next_child)
+
     @staticmethod
     def _get_active_child_sequence(
         station_config,
