@@ -100,6 +100,8 @@ class ShowCatalog:
         self.tags = []
 
         self.__fluid_builder = None
+        # raffll mod: {file: plays} summed over every tag folder that links the file
+        self._plays = None
         self.min_gap = 3
         self.skip_chapter_scan = skip_chapter_scan
         if rebuild_catalog:
@@ -134,6 +136,7 @@ class ShowCatalog:
         catalog_entries = CatalogAPI.get_entries(self.config)
         
         self.clip_index = {}
+        self._plays = None
 
         for entry in catalog_entries:
             
@@ -554,7 +557,44 @@ class ShowCatalog:
         else:
             return None
 
-    def find_candidate(self, tag, seconds, when, exclusion_index=None, proposed_start=None, meta_hints=None, min_duration=None, max_duration=None):
+    # --- raffll mod: one play count per file, no repeat within 24 h ---------------------
+    # Our catalog links one movie into several tag folders (one per slot pool). FS42 keeps a
+    # play count per catalog entry = per folder, so a movie played from one pool still looked
+    # unplayed in the next pool and could air twice the same evening. Features are now picked
+    # by the plays of the file over all folders, and a slot skips files the station already
+    # aired in the last 24 h (recent), unless nothing else fits.
+
+    @staticmethod
+    def file_key(entry):
+        return entry.realpath or os.path.realpath(entry.path)
+
+    def _file_plays(self):
+        if self._plays is None:
+            plays = {}
+            for entries in self.clip_index.values():
+                if not isinstance(entries, list):
+                    continue
+                for e in entries:
+                    if isinstance(e, CatalogEntry) and e.content_type == "feature":
+                        k = self.file_key(e)
+                        plays[k] = plays.get(k, 0) + (e.count or 0)
+            self._plays = plays
+        return self._plays
+
+    def _pick_feature(self, matches, recent):
+        if recent:
+            fresh = [m for m in matches if self.file_key(m) not in recent]
+            if fresh:
+                matches = fresh
+            else:
+                self._l.info(f"every candidate aired in the last 24 h ({len(matches)}) - repeating one")
+        plays = self._file_plays()
+        low = min(plays.get(self.file_key(m), 0) for m in matches)
+        result = random.choice([m for m in matches if plays.get(self.file_key(m), 0) == low])
+        plays[self.file_key(result)] = low + 1
+        return result
+
+    def find_candidate(self, tag, seconds, when, exclusion_index=None, proposed_start=None, meta_hints=None, min_duration=None, max_duration=None, recent=None):
         """Find the best candidate for a given tag and duration.
 
         exclusion_index: optional dict of {realpath: [(start, end), ...]} built from
@@ -607,7 +647,10 @@ class ShowCatalog:
                 else:
                     err = f"Could not find candidate video for tag={tag} under {seconds} in len - maybe add some shorter content?"
                 raise (MatchingContentNotFound(err))
-            result = self._lowest_count(matches)
+            if all(m.content_type == "feature" for m in matches):
+                result = self._pick_feature(matches, recent)  # raffll mod
+            else:
+                result = self._lowest_count(matches)
             # note, this has been migrated
             result.count += 1
             # CatalogAPI.set_play_count(self.config, result.path, result.count)

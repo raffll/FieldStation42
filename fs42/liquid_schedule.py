@@ -155,18 +155,19 @@ class LiquidSchedule:
                 )
                 min_duration = None
 
+            recent = self._recent_files(getattr(self, "_recent_index", {}), current_mark)  # raffll mod
             try:
                 candidate = self.catalog.find_candidate(
                     tag_str, timings.HOUR * 23, current_mark,
                     exclusion_index=exclusion_index, proposed_start=current_mark,
-                    min_duration=min_duration, max_duration=max_duration
+                    min_duration=min_duration, max_duration=max_duration, recent=recent
                 )
             except MatchingContentNotFound:
                 if exclusion_index:
                     # Exclusion may have blocked everything - retry without it.
                     # If this also fails it is a genuine content shortage.
                     try:
-                        candidate = self.catalog.find_candidate(tag_str, timings.HOUR * 23, current_mark, min_duration=min_duration, max_duration=max_duration)
+                        candidate = self.catalog.find_candidate(tag_str, timings.HOUR * 23, current_mark, min_duration=min_duration, max_duration=max_duration, recent=recent)
                         self._l.warning(
                             f"[{self.conf['network_name']}] Sibling exclusion blocked all candidates "
                             f"for tag={tag_str} at {current_mark} - "
@@ -414,6 +415,36 @@ class LiquidSchedule:
                     exclusion_index[rp] = []
                 exclusion_index[rp].append((block.start_time, block.end_time))
 
+    # --- raffll mod: no movie twice on this station within 24 h ------------------------
+    REPEAT_WINDOW = datetime.timedelta(hours=24)
+
+    def _build_recent_index(self, start_time):
+        """{file: [start times]} of this station's blocks in the 24 h before start_time
+        (earlier days are built by earlier runs, so they come from the database)."""
+        recent_index = {}
+        if start_time is None:
+            return recent_index
+        try:
+            blocks = LiquidIO().query_liquid_blocks(
+                self.conf["network_name"], str(start_time - self.REPEAT_WINDOW), str(start_time))
+        except (sqlite3.Error, OSError) as e:
+            self._l.warning(f"Could not read recent blocks - 24 h repeat check starts empty: {e}")
+            return recent_index
+        for block in blocks:
+            self._register_recent(recent_index, block)
+        return recent_index
+
+    @staticmethod
+    def _register_recent(recent_index, block):
+        content = getattr(block, "content", None) if block else None
+        if content is None or isinstance(content, list) or getattr(content, "content_type", None) != "feature":
+            return
+        recent_index.setdefault(ShowCatalog.file_key(content), []).append(block.start_time)
+
+    def _recent_files(self, recent_index, when):
+        lo = when - self.REPEAT_WINDOW
+        return {k for k, starts in recent_index.items() if any(lo < s <= when for s in starts)}
+
     def _fluid(self, start_time, end_target):
         # this is the core of the scheduler.
         new_blocks = []
@@ -426,6 +457,8 @@ class LiquidSchedule:
 
         # build exclusion index from sibling channels that share the same content_dir
         exclusion_index = self._build_exclusion_index(start_time, end_target)
+        # raffll mod: features this station aired recently (24 h repeat check)
+        self._recent_index = self._build_recent_index(current_mark)
 
         self._l.info(f"Starting to build blocks for {self.conf['network_name']}")
         slot_number = None
@@ -509,6 +542,7 @@ class LiquidSchedule:
             # here
             new_blocks.append(new_block)
             self._register_exclusion(exclusion_index, new_block)
+            self._register_recent(self._recent_index, new_block)
             current_mark = next_mark
         self._l.info("Content and reel schedules are completed")
 
